@@ -18,7 +18,11 @@ def _json_bytes(payload):
     return json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
-def create_handler(service, rules, static_dir):
+def create_handler(service, rules, static_dir, sink=None):
+    from .platform_sink import InMemoryPlatformSink
+
+    sink = sink or InMemoryPlatformSink()
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "ModularPython/1.0"
 
@@ -84,6 +88,10 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "reports"]:
+                    query = parse_qs(parsed.query)
+                    status = query.get("status", [None])[0]
+                    return self._send(200, {"items": service.list_outbox(status=status)})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api" and parts[1] != "entities":
@@ -101,6 +109,17 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if parts == ["api", "platform-events"]:
+                    body = self._body()
+                    events = body.get("events", [])
+                    return self._send(200, {"items": service.import_platform_events(actor, events)})
+                if len(parts) == 4 and parts[:2] == ["api", "platform-events"] and parts[3] == "claim":
+                    body = self._body()
+                    claim = service.claim_event(actor, parts[2], body.get("note"))
+                    return self._send(201, claim)
+                if parts == ["api", "reports", "flush"]:
+                    self._body()
+                    return self._send(200, {"items": service.flush_reports(sink)})
                 if parts == ["api", "offline-records"]:
                     body = self._body()
                     return self._send(200, {"items": service.merge_offline(actor, body.get("records", []))})
@@ -140,6 +159,6 @@ def create_handler(service, rules, static_dir):
     return Handler
 
 
-def create_server(host, port, service, rules, static_dir):
-    handler = create_handler(service, rules, static_dir)
+def create_server(host, port, service, rules, static_dir, sink=None):
+    handler = create_handler(service, rules, static_dir, sink=sink)
     return ThreadingHTTPServer((host, int(port)), handler)

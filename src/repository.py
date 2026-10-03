@@ -54,6 +54,23 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS claim_owners (
+                    platform_event_id TEXT PRIMARY KEY,
+                    claim_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS report_outbox (
+                    claim_id TEXT PRIMARY KEY,
+                    platform_event_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_outbox_status
+                    ON report_outbox(status);
             """)
 
     @staticmethod
@@ -197,6 +214,103 @@ class SQLiteRepository:
                 "INSERT OR REPLACE INTO idempotency(actor_id, idem_key, entity_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
+            )
+
+    def insert_claim(self, claim_id, event_id, owner_id, builder):
+        """原子认领：同一平台事件只允许第一条认领写入。
+
+        builder 在写锁事务内执行，返回 (status, data)。
+        已被认领时抛出带 owner 信息的 ConflictError。
+        """
+        now = utcnow()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT owner_id FROM claim_owners WHERE platform_event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if row:
+                raise ConflictError("event already claimed by " + row["owner_id"])
+            status, data = builder()
+            payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                "VALUES (?, 'reconciliation', ?, 1, ?, ?, ?, ?)",
+                (claim_id, status, payload, owner_id, now, now),
+            )
+            connection.execute(
+                "INSERT INTO claim_owners(platform_event_id, claim_id, owner_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (event_id, claim_id, owner_id, now),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_entity(claim_id)
+
+    def get_claim_for_event(self, event_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT claim_id FROM claim_owners WHERE platform_event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return self.get_entity(row["claim_id"]) if row else None
+
+    def upsert_outbox(self, claim_id, event_id, payload):
+        now = utcnow()
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO report_outbox(claim_id, platform_event_id, payload, status, updated_at) "
+                "VALUES (?, ?, ?, 'pending', ?) "
+                "ON CONFLICT(claim_id) DO UPDATE SET "
+                "payload = excluded.payload, status = 'pending', "
+                "attempts = 0, last_error = NULL, updated_at = excluded.updated_at",
+                (claim_id, event_id, raw, now),
+            )
+
+    def list_outbox(self, status=None):
+        with self._connect() as connection:
+            if status:
+                rows = connection.execute(
+                    "SELECT * FROM report_outbox WHERE status = ? ORDER BY claim_id",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM report_outbox ORDER BY claim_id"
+                ).fetchall()
+        return [
+            {
+                "claim_id": row["claim_id"],
+                "platform_event_id": row["platform_event_id"],
+                "payload": json.loads(row["payload"]),
+                "status": row["status"],
+                "attempts": int(row["attempts"]),
+                "last_error": row["last_error"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def mark_outbox_sent(self, claim_id):
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE report_outbox SET status = 'sent', last_error = NULL, updated_at = ? "
+                "WHERE claim_id = ?",
+                (utcnow(), claim_id),
+            )
+
+    def mark_outbox_failed(self, claim_id, error):
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE report_outbox SET status = 'pending', "
+                "attempts = attempts + 1, last_error = ?, updated_at = ? WHERE claim_id = ?",
+                (str(error)[:500], utcnow(), claim_id),
             )
 
     def ping(self):

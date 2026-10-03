@@ -126,11 +126,21 @@ def _complete_rescue(actor, entity, data, lookup):
     return {"resolved_by": actor.user_id}
 
 
+def _arrive_on_site(actor, entity, data, lookup):
+    # 到场时间以本地记录为准：动作未显式带时间则记当前时刻
+    return {"arrived_at": data.get("arrived_at") or datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+
+
+def _finish_rescue(actor, entity, data, lookup):
+    return {"completed_at": data.get("completed_at") or datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+
+
 class RuleEngine:
     ALIASES = {
         "equipments": "equipment", "inspections": "inspection", "maintenances": "maintenance",
         "alarms": "alarm", "rescue_jobs": "rescue_job", "remediations": "remediation",
-        "permits": "permit",
+        "permits": "permit", "platform_events": "platform_event",
+        "reconciliations": "reconciliation",
     }
     INITIAL_STATUS = {
         "equipment": "in_service", "inspection": "scheduled", "maintenance": "planned",
@@ -239,6 +249,8 @@ class RuleEngine:
         ("permit", "grant"): _grant_permit,
         ("remediation", "verify"): _verify_remediation,
         ("alarm", "close"): _complete_rescue,
+        ("rescue_job", "arrive"): _arrive_on_site,
+        ("rescue_job", "complete"): _finish_rescue,
     }
 
     def normalize_kind(self, kind):
