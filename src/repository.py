@@ -54,6 +54,20 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS report_item (
+                    id TEXT PRIMARY KEY,
+                    reconciliation_id TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(reconciliation_id, item_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_report_item_status
+                    ON report_item(status);
             """)
 
     @staticmethod
@@ -203,3 +217,87 @@ class SQLiteRepository:
         with self._connect() as connection:
             connection.execute("SELECT 1").fetchone()
         return True
+
+    # ---- 对账上报出报表 ----
+
+    @staticmethod
+    def _report_item_from_row(row):
+        return {
+            "id": row["id"],
+            "reconciliation_id": row["reconciliation_id"],
+            "item_key": row["item_key"],
+            "payload": json.loads(row["payload"]),
+            "status": row["status"],
+            "attempts": int(row["attempts"]),
+            "last_error": row["last_error"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_report_item(self, item_id, reconciliation_id, item_key, payload, status):
+        now = utcnow()
+        body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO report_item(id, reconciliation_id, item_key, payload, status, attempts, last_error, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, status = excluded.status, updated_at = excluded.updated_at",
+                (item_id, reconciliation_id, item_key, body, status, now, now),
+            )
+        return self.get_report_item(item_id)
+
+    def get_report_item(self, item_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM report_item WHERE id = ?", (item_id,)
+            ).fetchone()
+        return self._report_item_from_row(row) if row else None
+
+    def list_report_items(self, reconciliation_id=None, status=None):
+        clauses = []
+        params = []
+        if reconciliation_id:
+            clauses.append("reconciliation_id = ?")
+            params.append(reconciliation_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM report_item" + where + " ORDER BY id", params
+            ).fetchall()
+        return [self._report_item_from_row(row) for row in rows]
+
+    def list_pending_report_items(self):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM report_item WHERE status IN ('pending', 'failed') ORDER BY id"
+            ).fetchall()
+        return [self._report_item_from_row(row) for row in rows]
+
+    def update_report_item_status(self, item_id, status, last_error=None, increment_attempts=False):
+        now = utcnow()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE report_item SET status = ?, last_error = ?, "
+                "attempts = attempts + ?, updated_at = ? WHERE id = ?",
+                (status, last_error, 1 if increment_attempts else 0, now, item_id),
+            )
+        return self.get_report_item(item_id)
+
+    def supersede_report_items(self, reconciliation_id, keep_keys):
+        keep = list(keep_keys or [])
+        with self._connect() as connection:
+            if keep:
+                placeholders = ",".join("?" for _ in keep)
+                connection.execute(
+                    "UPDATE report_item SET status = 'superseded', updated_at = ? "
+                    "WHERE reconciliation_id = ? AND item_key NOT IN (%s)" % placeholders,
+                    [utcnow(), reconciliation_id] + keep,
+                )
+            else:
+                connection.execute(
+                    "UPDATE report_item SET status = 'superseded', updated_at = ? WHERE reconciliation_id = ?",
+                    (utcnow(), reconciliation_id),
+                )

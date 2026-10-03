@@ -33,6 +33,7 @@ class Role(str, Enum):
     inspector = "inspector"
     dispatcher = "dispatcher"
     maintenance = "maintenance"
+    duty = "duty"  # 值班员：负责平台困人报警对账认领与上报
 
 
 @dataclass

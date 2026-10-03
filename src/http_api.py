@@ -84,6 +84,8 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "reconciliations" and parts[3] == "items":
+                    return self._send(200, {"items": service.list_report_items(self._actor(), parts[2])})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api" and parts[1] != "entities":
@@ -101,6 +103,16 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if parts == ["api", "platform-events"]:
+                    body = self._body()
+                    return self._send(200, {"items": service.push_platform_events(actor, body.get("events", []))})
+                if parts == ["api", "reconciliations", "claim"]:
+                    body = self._body()
+                    return self._send(200, service.claim_reconciliation(actor, body.get("asset_no")))
+                if parts == ["api", "reconciliations", "recover"]:
+                    return self._send(200, service.recover_reports())
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "reconciliations" and parts[3] == "report":
+                    return self._send(200, service.report_reconciliation(actor, parts[2]))
                 if parts == ["api", "offline-records"]:
                     body = self._body()
                     return self._send(200, {"items": service.merge_offline(actor, body.get("records", []))})

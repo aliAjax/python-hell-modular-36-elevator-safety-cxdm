@@ -1,6 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .domain import ConflictError, InvalidTransition, PermissionDenied, ValidationError
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _require(data, fields):
@@ -126,6 +130,16 @@ def _complete_rescue(actor, entity, data, lookup):
     return {"resolved_by": actor.user_id}
 
 
+def _rescue_arrive(actor, entity, data, lookup):
+    # 到场时间以本地记录为准：调用方显式传入则用传入值，否则取当前时刻
+    return {"arrived_at": data.get("arrived_at") or _utcnow()}
+
+
+def _rescue_complete(actor, entity, data, lookup):
+    # 完成时间以本地记录为准
+    return {"completed_at": data.get("completed_at") or _utcnow()}
+
+
 class RuleEngine:
     ALIASES = {
         "equipments": "equipment", "inspections": "inspection", "maintenances": "maintenance",
@@ -136,6 +150,7 @@ class RuleEngine:
         "equipment": "in_service", "inspection": "scheduled", "maintenance": "planned",
         "alarm": "received", "rescue_job": "dispatched", "remediation": "open",
         "permit": "blocked",
+        "platform_event": "pending", "reconciliation": "active", "report_item": "pending",
     }
     TRANSITIONS = {
         "equipment": {
@@ -239,7 +254,11 @@ class RuleEngine:
         ("permit", "grant"): _grant_permit,
         ("remediation", "verify"): _verify_remediation,
         ("alarm", "close"): _complete_rescue,
+        ("rescue_job", "arrive"): _rescue_arrive,
+        ("rescue_job", "complete"): _rescue_complete,
     }
+    # 这些种类只能通过专用工作流创建，不接受通用 POST /api/<kind>
+    MANAGED_KINDS = ("platform_event", "reconciliation", "report_item")
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -254,6 +273,8 @@ class RuleEngine:
         kind = self.normalize_kind(kind)
         if kind not in self.INITIAL_STATUS:
             raise ValidationError("unknown kind: " + str(kind))
+        if kind in self.MANAGED_KINDS:
+            raise ValidationError("kind %s is managed through a dedicated workflow" % kind)
         _ensure_role(actor, self.CREATE_ROLES.get(kind, ("admin",)))
         _require(data, self.CREATE_REQUIRED.get(kind, ()))
         custom = self.CUSTOM_CREATE.get(kind)

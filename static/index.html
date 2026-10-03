@@ -7,5 +7,11 @@
 GET  /api/&lt;kind&gt;
 POST /api/&lt;kind&gt;
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre></main>
+POST /api/entities/&lt;id&gt;/actions</pre>
+<h2>平台困人报警对账</h2><pre>POST /api/platform-events            {"events":[{"platform_event_id":"PE-1","asset_no":"E-1","alarm_at":"2026-09-27T10:00:00Z"}]}
+POST /api/reconciliations/claim      {"asset_no":"E-1"}   （需 X-Role: duty）
+POST /api/reconciliations/&lt;id&gt;/report                      （需 X-Role: duty）
+GET  /api/reconciliations
+GET  /api/reconciliations/&lt;id&gt;/items
+POST /api/reconciliations/recover</pre></main>
 <script>async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>

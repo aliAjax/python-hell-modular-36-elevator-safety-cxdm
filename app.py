@@ -18,6 +18,11 @@ def main(argv=None):
     repository = SQLiteRepository(args.db)
     rules = RuleEngine()
     service = DomainService(repository, rules)
+    # 重启后继续处理上次没写进平台的上报项
+    try:
+        service.recover_reports()
+    except Exception as exc:  # noqa: BLE001 续跑失败不应阻止服务启动
+        print("report recovery skipped: %s" % exc, flush=True)
     static_dir = Path(__file__).resolve().parent / "static"
     server = create_server(args.host, args.port, service, rules, str(static_dir))
 
